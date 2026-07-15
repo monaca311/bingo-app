@@ -11,7 +11,6 @@ export default function BingoPage() {
   const [isBingo, setIsBingo] = useState(false);
   const [reachCoords, setReachCoords] = useState<string[]>([]); // リーチの座標
   const [lastTap, setLastTap] = useState(0);
-  const [resetCount, setResetCount] = useState(0); // リセット用のカウント
 
   useEffect(() => {
     const savedCard = localStorage.getItem('bingo-card');
@@ -69,35 +68,60 @@ export default function BingoPage() {
     }
   };
 
-  const handlePunch = (colIndex: number, rowIndex: number) => {
-    if (punched[rowIndex][colIndex]) return;
-    const now = Date.now();
-    if (now - lastTap < 300) {
-      const next = [...punched.map(row => [...row])];
-      next[rowIndex][colIndex] = true;
-      setPunched(next);
-      localStorage.setItem('bingo-punched', JSON.stringify(next));
-      checkBingo(next);
-      if (window.navigator.vibrate) window.navigator.vibrate([30, 10, 30]);
+  // 1. handlePunch 関数をトグル（切り替え）式に修正
+const handlePunch = (colIndex: number, rowIndex: number) => {
+  const now = Date.now();
+  if (now - lastTap < 300) {
+    // ダブルタップ成功
+    const next = [...punched.map(row => [...row])];
+    
+    // 今の状態を反転させる（trueならfalseに、falseならtrueに）
+    next[rowIndex][colIndex] = !next[rowIndex][colIndex];
+    
+    setPunched(next);
+    localStorage.setItem('bingo-punched', JSON.stringify(next));
+    checkBingo(next); // 閉じた場合もリーチ判定を再計算
+    
+    if (window.navigator.vibrate) {
+      // 開けるときは強め、閉じるときは弱めの振動にすると高級感が出るよ
+      window.navigator.vibrate(next[rowIndex][colIndex] ? [30, 10, 30] : [10]);
     }
-    setLastTap(now);
-  };
+  }
+  setLastTap(now);
+};
 
-  const devReset = () => {
+// 2. リセットコマンドを「右下マスの連打」に変更
+const checkResetCommand = (colIndex: number, rowIndex: number) => {
+  // 右下（4, 4）のマスがタップされたかチェック
+  if (colIndex === 4 && rowIndex === 4) {
+    const newCount = resetCount + 1;
+    setResetCount(newCount);
+    if (newCount >= 5) {
+      if (confirm('【運営用】カードをリセットしますか？')) {
+        localStorage.clear();
+        window.location.reload();
+      }
+      setLastTap(0); // リセット後はカウントクリア
+    }
+  } else {
+    setResetCount(0); // 他のマスを触ったらカウントリセット（よりバレにくく）
+  }
+};
+
+const [resetCount, setResetCount] = useState(0);
+
+const devReset = (e: React.MouseEvent) => {
+  e.stopPropagation();
   const newCount = resetCount + 1;
   setResetCount(newCount);
 
-  // 5回タップされたらリセット処理へ
   if (newCount >= 5) {
-    if (confirm('【運営用】カードを初期化して新しく作り直しますか？')) {
+    if (confirm('【運営】初期化して新しいカードを生成しますか？')) {
       localStorage.clear();
       window.location.reload();
     }
-    setResetCount(0); // キャンセルしてもカウントは戻しておく
+    setResetCount(0);
   }
-
-  // 3秒間タップがなかったらカウントをリセットする（おまけの安心機能）
-  setTimeout(() => setResetCount(0), 3000);
 };
 
   if (card.length === 0) return null;
@@ -105,7 +129,7 @@ export default function BingoPage() {
   return (
     <main className="min-h-screen bg-slate-900 text-white p-4 flex flex-col items-center font-sans select-none overflow-x-hidden">
       <div className="text-center mb-8">
-        <h1 onClick={devReset} className="text-4xl font-black italic text-yellow-400 cursor-pointer">KITFES BINGO</h1>
+        <h1 className="text-4xl font-black italic text-yellow-400 cursor-pointer">KITFES BINGO</h1>
         {isBingo && <p className="text-5xl font-black text-orange-500 animate-bounce mt-4">BINGO!!</p>}
       </div>
       
@@ -126,7 +150,10 @@ export default function BingoPage() {
               <button
                 key={`${rowIndex}-${colIndex}`}
                 onContextMenu={(e) => e.preventDefault()}
-                onClick={() => handlePunch(colIndex, rowIndex)}
+                onClick={() => {
+                  handlePunch(colIndex, rowIndex);
+                  // checkResetCommand(colIndex, rowIndex); ← これを消す！
+                }}
                 style={{ WebkitTouchCallout: 'none' }}
                 className={`relative w-14 h-14 sm:w-20 sm:h-20 rounded-xl font-black text-xl transition-all duration-300
                   ${isPunched 
@@ -148,10 +175,20 @@ export default function BingoPage() {
         ))}
       </div>
 
-      <div className="mt-8 text-slate-500 text-[10px] text-center space-y-2">
-        <p>【操作】素早く「2回タップ」で穴を開けます</p>
-        {reachCoords.length > 0 && !isBingo && <p className="text-yellow-400 font-bold animate-pulse">あと少し！光っている数字を狙え！</p>}
-      </div>
+      <div className="mt-12 text-slate-500 text-[10px] text-center space-y-2 opacity-50">
+  <p>素早くダブルタップで穴を開けます。</p>
+  <p>穴を開けた場所をダブルタップで穴を閉じます。</p>
+  <p>
+    ブラウザを閉じても継続できます
+    {/* この「。」だけにリセット機能を仕込む */}
+    <span 
+      onClick={devReset} 
+      className="cursor-default active:bg-slate-700/50" // 運営だけがわかる微かな反応
+    >
+      。
+    </span>
+  </p>
+</div>
     </main>
   );
 }
