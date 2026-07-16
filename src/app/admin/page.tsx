@@ -311,7 +311,7 @@ export default function AdminPage() {
         </button>
       </div>
 
-      {/* リアルタイム・ビンゴ発生リスト */}
+     {/* リアルタイム・ビンゴ発生リスト */}
       <div className="w-full max-w-md mt-8 bg-slate-900 border border-slate-800/60 rounded-3xl p-6 shadow-2xl">
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-sm font-bold text-red-400 flex items-center gap-2">
@@ -332,7 +332,8 @@ export default function AdminPage() {
                   <span className="text-xs font-black bg-red-600/20 text-red-400 px-2 py-1 rounded">
                     第 {idx + 1} 号
                   </span>
-                  <span className="font-bold text-slate-200">ID: {bingo.card_no}</span>
+                  {/* 🌟【超重要】card_noではなく、DBが保証する一意の連番idを使って「DG-xx」と表示！ */}
+                  <span className="font-bold text-slate-200">ID: DG-{bingo.id}</span>
                 </div>
                 <span className="text-[10px] text-slate-500">
                   {new Date(bingo.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
@@ -342,7 +343,7 @@ export default function AdminPage() {
           )}
         </div>
       </div>
-
+      
       {/* 履歴一覧 */}
       <div className="w-full max-w-md mt-8">
         <h2 className="text-sm font-bold text-slate-400 mb-4">これまでの履歴 ({drawnNumbers.length})</h2>

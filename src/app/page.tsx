@@ -8,21 +8,31 @@ export default function BingoCardPage() {
   const [card, setCard] = useState<number[][] | null>(null);
   const [punched, setPunched] = useState<boolean[][]>([]);
   const [drawnNumbers, setDrawnNumbers] = useState<number[]>([]);
-  const [cardId, setCardId] = useState<string>('');
+  const [cardId, setCardId] = useState<string>(''); // 🌟 端末の仮ID
   const [hasSentBingo, setHasSentBingo] = useState<boolean>(false);
   
   const [isReach, setIsReach] = useState<boolean>(false);
   const [showBingoModal, setShowBingoModal] = useState<boolean>(false);
   const [reachCells, setReachCells] = useState<Set<string>>(new Set());
 
+  // 🌟 画面上に表示する「確定BINGOシリアルID」（例: DG-12）
+  const [finalSerialId, setFinalSerialId] = useState<string>('');
+
   // 1. 初期読み込み ＆ セッション同期 ＆ リアルタイム監視
   useEffect(() => {
+    // 端末を一意に識別する仮ID（衝突しても問題ない一時的なもの）
     let savedId = localStorage.getItem('bingo-card-id');
     if (!savedId) {
-      savedId = `DG-${Math.floor(100 + Math.random() * 900)}`;
+      savedId = `TEMP-${Math.floor(1000 + Math.random() * 9000)}`;
       localStorage.setItem('bingo-card-id', savedId);
     }
     setCardId(savedId);
+
+    // すでにビンゴして確定したシリアルIDがあれば復元
+    const savedSerialId = localStorage.getItem('bingo-serial-id');
+    if (savedSerialId) {
+      setFinalSerialId(savedSerialId);
+    }
 
     const fetchGameStateAndSync = async () => {
       const { data } = await supabase
@@ -38,10 +48,14 @@ export default function BingoCardPage() {
         const savedSessionId = localStorage.getItem('bingo-session-id');
 
         if (savedSessionId !== currentSessionId) {
+          // 🌟 セッション変更時は、すべてをクリアして初期化
           localStorage.removeItem('bingo-card');
           localStorage.removeItem('bingo-punched');
           localStorage.removeItem('bingo-has-sent');
+          localStorage.removeItem('bingo-serial-id');
           localStorage.setItem('bingo-session-id', currentSessionId);
+          setFinalSerialId('');
+          setHasSentBingo(false);
           await generateNewCard();
         } else {
           const savedCard = localStorage.getItem('bingo-card');
@@ -55,7 +69,8 @@ export default function BingoCardPage() {
             const parsedPunched = JSON.parse(savedPunched);
             setCard(parsedCard);
             setPunched(parsedPunched);
-            checkReachAndBingoState(parsedPunched, false); // 初期ロード時はバイブなし
+            // 🌟【バグ②対策】非同期のStateではなく、ストレージから取得した生フラグ(savedHasSent)を直接渡す！
+            checkReachAndBingoState(parsedPunched, false, savedHasSent);
           } else {
             await generateNewCard();
           }
@@ -79,7 +94,9 @@ export default function BingoCardPage() {
             localStorage.removeItem('bingo-card');
             localStorage.removeItem('bingo-punched');
             localStorage.removeItem('bingo-has-sent');
+            localStorage.removeItem('bingo-serial-id');
             localStorage.setItem('bingo-session-id', updated.session_id);
+            setFinalSerialId('');
             setHasSentBingo(false);
             setIsReach(false);
             setReachCells(new Set());
@@ -130,25 +147,25 @@ export default function BingoCardPage() {
     setPunched(newPunched);
     localStorage.setItem('bingo-punched', JSON.stringify(newPunched));
 
-    checkReachAndBingoState(newPunched, true); // タップ時はバイブ通知を許可
+    // 🌟 タップ時は、その時点の hasSentBingo の最新状態を渡す
+    checkReachAndBingoState(newPunched, true, hasSentBingo);
   };
 
   // 3. リーチ ＆ ビンゴの判定
-  const checkReachAndBingoState = (currentPunched: boolean[][], triggerVibrate: boolean = false) => {
+  // 🌟【バグ②対策】引数に isAlreadySent を用意し、外部から確実に送信状況を教えてもらう
+  const checkReachAndBingoState = (
+    currentPunched: boolean[][], 
+    triggerVibrate: boolean = false,
+    isAlreadySent: boolean = false
+  ) => {
     let isBingo = false;
     const newReachCells = new Set<string>();
 
     const lines: [number, number][][] = [];
 
-    // 横ライン5本
-    for (let r = 0; r < 5; r++) {
-      lines.push([[r, 0], [r, 1], [r, 2], [r, 3], [r, 4]]);
-    }
-    // 縦ライン5本
-    for (let c = 0; c < 5; c++) {
-      lines.push([[0, c], [1, c], [2, c], [3, c], [4, c]]);
-    }
-    // 斜め2本
+    // 横、縦、斜め
+    for (let r = 0; r < 5; r++) lines.push([[r, 0], [r, 1], [r, 2], [r, 3], [r, 4]]);
+    for (let c = 0; c < 5; c++) lines.push([[0, c], [1, c], [2, c], [3, c], [4, c]]);
     lines.push([[0, 0], [1, 1], [2, 2], [3, 3], [4, 4]]);
     lines.push([[0, 4], [1, 3], [2, 2], [3, 1], [4, 0]]);
 
@@ -175,13 +192,13 @@ export default function BingoCardPage() {
       const nowReach = newReachCells.size > 0;
       setIsReach(nowReach);
 
-      // 🌟【UX追加】新しくリーチがかかった瞬間に、スマホを「トトッ」と可愛くバイブ振動させる
       if (triggerVibrate && nowReach && !wasReachBefore && window.navigator.vibrate) {
         window.navigator.vibrate([80, 50, 80]);
       }
     }
 
-    if (isBingo && !hasSentBingo) {
+    // 🌟 すでに送信済みでない、かつ今回ビンゴしていたら送信処理へ！
+    if (isBingo && !isAlreadySent) {
       triggerBingoSuccess();
     }
   };
@@ -189,38 +206,35 @@ export default function BingoCardPage() {
   const triggerBingoSuccess = async () => {
     setHasSentBingo(true);
     localStorage.setItem('bingo-has-sent', 'true');
-    setShowBingoModal(true);
 
+    // 確定をド派手に祝う紙吹雪
     const duration = 3 * 1000;
     const end = Date.now() + duration;
-
     (function frame() {
-      confetti({
-        particleCount: 3,
-        angle: 60,
-        spread: 55,
-        origin: { x: 0 }
-      });
-      confetti({
-        particleCount: 3,
-        angle: 120,
-        spread: 55,
-        origin: { x: 1 }
-      });
-
-      if (Date.now() < end) {
-        requestAnimationFrame(frame);
-      }
+      confetti({ particleCount: 3, angle: 60, spread: 55, origin: { x: 0 } });
+      confetti({ particleCount: 3, angle: 120, spread: 55, origin: { x: 1 } });
+      if (Date.now() < end) requestAnimationFrame(frame);
     }());
 
-    const currentId = localStorage.getItem('bingo-card-id') || cardId || 'No.Temp_User';
-    const { error } = await supabase
+    // 🌟【バグ①対策】card_no には端末の仮IDをそのままセットして1回だけ INSERT する！
+    // 連番の ID（id）を即座にデータベースから返してもらう。
+    const { data, error } = await supabase
       .from('active_bingos')
-      .insert([{ card_no: currentId }]);
+      .insert([{ card_no: cardId }])
+      .select('id')
+      .single();
 
     if (error) {
       console.error('ビンゴ通知の送信に失敗:', error);
       setHasSentBingo(false);
+      localStorage.removeItem('bingo-has-sent');
+      alert('送信に失敗しました。電波の良いところで再度お試しください。');
+    } else if (data) {
+      // 🌟 返ってきた連番idから、絶対に被らない連番ID「DG-連番」を生成
+      const uniqueId = `DG-${data.id}`;
+      setFinalSerialId(uniqueId);
+      localStorage.setItem('bingo-serial-id', uniqueId); // ローカルに保存
+      setShowBingoModal(true);
     }
   };
 
@@ -248,15 +262,19 @@ export default function BingoCardPage() {
 
       <div className="relative z-10 w-full max-w-sm flex flex-col items-center">
         
-        {/* 1. ID表示：少し下げて控えめに配置 */}
-        <div className="mb-2 flex items-center gap-1.5 bg-black/40 backdrop-blur-md border border-white/10 px-3.5 py-1 rounded-full shadow-inner">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+        {/* 1. ID表示：ビンゴ前とビンゴ後で綺麗に表示を変える */}
+        <div className="mb-2 flex items-center gap-1.5 bg-black/40 backdrop-blur-md border border-white/10 px-3.5 py-1.5 rounded-full shadow-inner">
+          <span className={`w-1.5 h-1.5 rounded-full ${finalSerialId ? 'bg-emerald-400' : 'bg-yellow-400'} animate-pulse`} />
           <p className="text-[10px] font-semibold tracking-wider text-white/50">
-            CARD ID: <span className="text-white font-mono text-[11px]">{cardId}</span>
+            {finalSerialId ? (
+              <>REGISTRATION ID: <span className="text-white font-mono text-[11px] font-bold">{finalSerialId}</span></>
+            ) : (
+              <span>BINGOした瞬間にIDが確定します 🎁</span>
+            )}
           </p>
         </div>
 
-        {/* 🌟 2. リーチ表示エリア：カードの真上で圧倒的に目立つように新設！ */}
+        {/* 2. リーチ表示エリア */}
         <div className="w-full h-14 flex items-center justify-center mb-3">
           {isReach && !hasSentBingo ? (
             <div className="bg-gradient-to-r from-red-500 via-rose-500 to-pink-500 text-white border border-rose-400/30 px-8 py-2.5 rounded-2xl text-sm font-black tracking-[0.2em] shadow-[0_0_20px_rgba(244,63,94,0.6)] animate-bounce flex items-center gap-2">
@@ -265,7 +283,6 @@ export default function BingoCardPage() {
               <span className="animate-pulse">🔥</span>
             </div>
           ) : (
-            // リーチしていない時は、高さを保ちつつ透明なプレースホルダーにしてレイアウトのガタつきを防ぐよ
             <div className="h-full w-1" />
           )}
         </div>
@@ -303,7 +320,6 @@ export default function BingoCardPage() {
                           ? 'bg-black/40 text-white/20 shadow-[inset_0_5px_8px_rgba(0,0,0,0.8)] border border-black/50 scale-[0.93] pointer-events-auto'
                           : isAvailable
                             ? 'bg-white/10 text-yellow-300 border border-yellow-300/40 hover:scale-105 active:scale-95 shadow-[0_4px_12px_rgba(250,204,21,0.1)]'
-                            // まだ引かれていなくて、かつ「リーチマス」なら赤ピンクの超点滅！
                             : isReachCell
                               ? 'bg-gradient-to-b from-rose-600/15 to-red-600/10 text-rose-400 border border-rose-500/50 animate-neon-pulse cursor-not-allowed shadow-[0_0_10px_rgba(244,63,94,0.15)]'
                               : 'bg-black/20 text-white/20 border border-white/5 cursor-not-allowed'
@@ -355,7 +371,7 @@ export default function BingoCardPage() {
 
             <div className="bg-slate-950 border border-slate-800/80 rounded-2xl py-4 px-6 inline-block">
               <p className="text-[10px] font-bold text-slate-500 tracking-wider">REGISTRATION ID</p>
-              <p className="text-xl font-mono font-black text-white mt-1">{cardId}</p>
+              <p className="text-xl font-mono font-black text-white mt-1">{finalSerialId}</p>
             </div>
 
             <div className="text-xs text-slate-500 leading-relaxed">
