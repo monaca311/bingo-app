@@ -2,6 +2,11 @@
 
 import React, { useState, useEffect } from 'react';
 import confetti from 'canvas-confetti';
+import { evaluateBingoState } from '../utils/bingoUtils';
+import { BingoBoard } from '../components/BingoBoard';
+import { DevResetTrigger } from '../components/DevResetTrigger';
+import { getUniqueCard } from '../actions/getUniqueCard';
+import { supabase } from '../lib/supabase';
 
 export default function BingoPage() {
   const [card, setCard] = useState<number[][]>([]);
@@ -9,186 +14,132 @@ export default function BingoPage() {
     Array(5).fill(null).map(() => Array(5).fill(false))
   );
   const [isBingo, setIsBingo] = useState(false);
-  const [reachCoords, setReachCoords] = useState<string[]>([]); // リーチの座標
+  const [reachCoords, setReachCoords] = useState<string[]>([]);
   const [lastTap, setLastTap] = useState(0);
 
   useEffect(() => {
-    const savedCard = localStorage.getItem('bingo-card');
-    const savedPunched = localStorage.getItem('bingo-punched');
+  const savedCard = localStorage.getItem('bingo-card');
+  const savedPunched = localStorage.getItem('bingo-punched');
 
-    if (savedCard && savedPunched) {
-      const p = JSON.parse(savedPunched);
-      setCard(JSON.parse(savedCard));
-      setPunched(p);
-      checkBingo(p);
-    } else {
-      const newCard = [0, 1, 2, 3, 4].map(i => {
-        const min = i * 15 + 1;
-        return Array.from({ length: 15 }, (_, j) => min + j)
-          .sort(() => Math.random() - 0.5).slice(0, 5);
-      });
-      setCard(newCard);
-      const initialPunched = Array(5).fill(null).map(() => Array(5).fill(false));
-      initialPunched[2][2] = true; // FREE
-      setPunched(initialPunched);
-      localStorage.setItem('bingo-card', JSON.stringify(newCard));
-      localStorage.setItem('bingo-punched', JSON.stringify(initialPunched));
+  if (savedCard && savedPunched) {
+    const p = JSON.parse(savedPunched);
+    setCard(JSON.parse(savedCard));
+    setPunched(p);
+    triggerBingoCheck(p);
+  } else {
+      // サーバーサイドで紙カードと被らないカードを取得する
+      getUniqueCard()
+        .then((uniqueCard) => {
+          setCard(uniqueCard);
+
+          const initialPunched = Array(5).fill(null).map(() => Array(5).fill(false));
+          initialPunched[2][2] = true; // FREE
+          setPunched(initialPunched);
+
+          // 🌟【追加】スマホ用のデジタルカードID（例: DG-382）をランダム生成して保存する
+          const randomId = `DG-${Math.floor(100 + Math.random() * 900)}`;
+          localStorage.setItem('bingo-card-id', randomId);
+
+          localStorage.setItem('bingo-card', JSON.stringify(uniqueCard));
+          localStorage.setItem('bingo-punched', JSON.stringify(initialPunched));
+        })
+        .catch((err) => {
+          console.error("カード生成に失敗:", err);
+          alert("通信エラーが発生しました。リロードしてください。");
+        });
     }
-  }, []);
+}, []);
 
-  // リーチ・ビンゴ判定（特定座標を光らせるロジック）
-  const checkBingo = (currentPunched: boolean[][]) => {
-    let bingoFound = false;
-    const newReachCoords: string[] = [];
+  // 【追加】すでにビンゴ通知を送信したかどうかを記録するフラグ（連打で何回も通知が送られないようにするため）
+  const [hasSentBingo, setHasSentBingo] = useState(false);
 
-    const checkLine = (coords: {r: number, c: number}[]) => {
-      const punchedInLine = coords.filter(pos => currentPunched[pos.r][pos.c]);
-      if (punchedInLine.length === 5) bingoFound = true;
-      if (punchedInLine.length === 4) {
-        const missing = coords.find(pos => !currentPunched[pos.r][pos.c]);
-        if (missing) newReachCoords.push(`${missing.r}-${missing.c}`);
-      }
-    };
-
-    for (let i = 0; i < 5; i++) {
-      checkLine([0, 1, 2, 3, 4].map(j => ({ r: i, c: j }))); // 横
-      checkLine([0, 1, 2, 3, 4].map(j => ({ r: j, c: i }))); // 縦
-    }
-    checkLine([0, 1, 2, 3, 4].map(i => ({ r: i, c: i })));
-    checkLine([0, 1, 2, 3, 4].map(i => ({ r: i, c: 4 - i })));
+  const triggerBingoCheck = async (currentPunched: boolean[][]) => {
+    const { isBingo: bingoFound, reachCoords: newReachCoords } = evaluateBingoState(currentPunched);
 
     if (bingoFound) {
       if (!isBingo) {
         confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
         setIsBingo(true);
+
+        // 🌟【追加】ビンゴ通知をSupabaseに自動送信する！
+        if (!hasSentBingo) {
+          setHasSentBingo(true);
+          
+          const cardId = localStorage.getItem('bingo-card-id') || 'No.Temp_User';
+          
+          // 【デバッグ用ログ】
+          console.log('ビンゴ検知！送信するカードID:', cardId);
+
+          const { error } = await supabase
+            .from('active_bingos')
+            .insert([{ card_no: cardId }]);
+
+          if (error) {
+            console.error('ビンゴ通知の送信に失敗詳細:', error);
+            alert('通知送信に失敗しました: ' + error.message);
+          } else {
+            console.log('ビンゴ通知の送信に成功しました！');
+            alert(`ビンゴ通知を送信しました！ (ID: ${cardId})`);
+          }
+        }
       }
       setReachCoords([]);
     } else {
+      setIsBingo(false);
       setReachCoords(newReachCoords);
+      // ビンゴ状態でなくなったら送信フラグをリセット（トグルで穴を塞ぎ直した時用）
+      setHasSentBingo(false);
     }
   };
 
-  // 1. handlePunch 関数をトグル（切り替え）式に修正
-const handlePunch = (colIndex: number, rowIndex: number) => {
-  const now = Date.now();
-  if (now - lastTap < 300) {
-    // ダブルタップ成功
-    const next = [...punched.map(row => [...row])];
-    
-    // 今の状態を反転させる（trueならfalseに、falseならtrueに）
-    next[rowIndex][colIndex] = !next[rowIndex][colIndex];
-    
-    setPunched(next);
-    localStorage.setItem('bingo-punched', JSON.stringify(next));
-    checkBingo(next); // 閉じた場合もリーチ判定を再計算
-    
-    if (window.navigator.vibrate) {
-      // 開けるときは強め、閉じるときは弱めの振動にすると高級感が出るよ
-      window.navigator.vibrate(next[rowIndex][colIndex] ? [30, 10, 30] : [10]);
-    }
-  }
-  setLastTap(now);
-};
+  const handlePunch = (colIndex: number, rowIndex: number) => {
+    const now = Date.now();
+    if (now - lastTap < 300) {
+      const next = [...punched.map(row => [...row])];
+      next[rowIndex][colIndex] = !next[rowIndex][colIndex];
 
-// 2. リセットコマンドを「右下マスの連打」に変更
-const checkResetCommand = (colIndex: number, rowIndex: number) => {
-  // 右下（4, 4）のマスがタップされたかチェック
-  if (colIndex === 4 && rowIndex === 4) {
-    const newCount = resetCount + 1;
-    setResetCount(newCount);
-    if (newCount >= 5) {
-      if (confirm('【運営用】カードをリセットしますか？')) {
-        localStorage.clear();
-        window.location.reload();
+      setPunched(next);
+      localStorage.setItem('bingo-punched', JSON.stringify(next));
+      triggerBingoCheck(next);
+
+      if (window.navigator.vibrate) {
+        window.navigator.vibrate(next[rowIndex][colIndex] ? [30, 10, 30] : [10]);
       }
-      setLastTap(0); // リセット後はカウントクリア
     }
-  } else {
-    setResetCount(0); // 他のマスを触ったらカウントリセット（よりバレにくく）
-  }
-};
+    setLastTap(now);
+  };
 
-const [resetCount, setResetCount] = useState(0);
-
-const devReset = (e: React.MouseEvent) => {
-  e.stopPropagation();
-  const newCount = resetCount + 1;
-  setResetCount(newCount);
-
-  if (newCount >= 5) {
+  const handleReset = () => {
     if (confirm('【運営】初期化して新しいカードを生成しますか？')) {
       localStorage.clear();
       window.location.reload();
     }
-    setResetCount(0);
-  }
-};
+  };
 
   if (card.length === 0) return null;
 
   return (
     <main className="min-h-screen bg-slate-900 text-white p-4 flex flex-col items-center font-sans select-none overflow-x-hidden">
       <div className="text-center mb-8">
-        <h1 className="text-4xl font-black italic text-yellow-400 cursor-pointer">KITFES BINGO</h1>
-        {isBingo && <p className="text-5xl font-black text-orange-500 animate-bounce mt-4">BINGO!!</p>}
-      </div>
-      
-      {/* ビンゴカード */}
-      <div className={`grid grid-cols-5 gap-2 bg-slate-800 p-4 rounded-2xl shadow-2xl border-4 transition-all
-        ${isBingo ? 'border-orange-500' : reachCoords.length > 0 ? 'border-yellow-400' : 'border-slate-700'}`}>
-        
-        {['B', 'I', 'N', 'G', 'O'].map(h => (
-          <div key={h} className="text-center font-black text-2xl text-slate-500 pb-2">{h}</div>
-        ))}
-        
-        {punched.map((row, rowIndex) => (
-          row.map((isPunched, colIndex) => {
-            const isFree = rowIndex === 2 && colIndex === 2;
-            const isTarget = reachCoords.includes(`${rowIndex}-${colIndex}`);
-            
-            return (
-              <button
-                key={`${rowIndex}-${colIndex}`}
-                onContextMenu={(e) => e.preventDefault()}
-                onClick={() => {
-                  handlePunch(colIndex, rowIndex);
-                  // checkResetCommand(colIndex, rowIndex); ← これを消す！
-                }}
-                style={{ WebkitTouchCallout: 'none' }}
-                className={`relative w-14 h-14 sm:w-20 sm:h-20 rounded-xl font-black text-xl transition-all duration-300
-                  ${isPunched 
-                    ? 'bg-slate-900 text-yellow-600 shadow-inner scale-95' 
-                    : isTarget && !isBingo 
-                      ? 'bg-yellow-400 text-slate-900 shadow-[0_0_20px_#facc15] animate-pulse scale-105 z-20' 
-                      : 'bg-gradient-to-br from-slate-600 to-slate-700 text-white shadow-lg active:scale-90'}
-                `}
-              >
-                {isPunched && !isFree && (
-                  <div className="absolute inset-0 flex items-center justify-center opacity-30">
-                    <div className="w-12 h-12 bg-black rounded-full border-4 border-slate-800" />
-                  </div>
-                )}
-                <span className="relative z-10">{isFree ? 'FREE' : card[colIndex][rowIndex]}</span>
-              </button>
-            );
-          })
-        ))}
+        <h1 className="text-4xl font-black italic text-yellow-400 cursor-pointer">
+          KITFES BINGO
+        </h1>
+        {isBingo && (
+          <p className="text-5xl font-black text-orange-500 animate-bounce mt-4">
+            BINGO!!
+          </p>
+        )}
       </div>
 
-      <div className="mt-12 text-slate-500 text-[10px] text-center space-y-2 opacity-50">
-  <p>素早くダブルタップで穴を開けます。</p>
-  <p>穴を開けた場所をダブルタップで穴を閉じます。</p>
-  <p>
-    ブラウザを閉じても継続できます
-    {/* この「。」だけにリセット機能を仕込む */}
-    <span 
-      onClick={devReset} 
-      className="cursor-default active:bg-slate-700/50" // 運営だけがわかる微かな反応
-    >
-      。
-    </span>
-  </p>
-</div>
+      <BingoBoard
+        card={card}
+        punched={punched}
+        isBingo={isBingo}
+        reachCoords={reachCoords}
+        onPunch={handlePunch}
+      />
+
+      <DevResetTrigger onReset={handleReset} />
     </main>
   );
 }
