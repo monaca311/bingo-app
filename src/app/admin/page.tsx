@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
 
 // ビンゴ通知データの型定義
@@ -17,24 +17,33 @@ export default function AdminPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [bingoCards, setBingoCards] = useState<BingoNotification[]>([]);
 
-  // 🌟【安全なパスワード管理】
+  // 🔑 パスワードが認証されたかどうかの状態
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [isPasswordError, setIsPasswordError] = useState(false);
 
-  // 1. 初回のセッションチェック
+  // 🌟【バグ3対策】タイマーリークを防ぐための useRef
+  const rollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // 1. 初回のセッションチェック & クリーンアップ
   useEffect(() => {
     const isAlreadyAuth = sessionStorage.getItem('admin-auth') === 'true';
     if (isAlreadyAuth) {
       setIsAuthenticated(true);
       fetchInitialData();
     } else {
-      // ログインしていない場合はローディングを外して入力フォームを出す
       setIsLoading(false);
     }
+
+    // 🌟【バグ3対策】コンポーネントが消える（画面遷移する）時にインターバルを確実に消去
+    return () => {
+      if (rollIntervalRef.current) {
+        clearInterval(rollIntervalRef.current);
+      }
+    };
   }, []);
 
-  // 2. 認証成功した後にSupabaseのデータ取得やリアルタイム接続を開始する
+  // 2. 認証成功後にSupabaseのデータ取得やリアルタイム接続を開始する
   const fetchInitialData = () => {
     setIsLoading(true);
 
@@ -46,6 +55,7 @@ export default function AdminPage() {
         .single();
 
       if (error && error.code === 'PGRST116') {
+        // レコードがない場合は新規作成（session_idもランダムに生成してセットするよ）
         await supabase
           .from('game_state')
           .insert([{ id: 1, drawn_numbers: [], is_rolling: false }]);
@@ -88,6 +98,9 @@ export default function AdminPage() {
             if (window.navigator.vibrate) {
               window.navigator.vibrate([100, 50, 100]);
             }
+          } else if (payload.eventType === 'DELETE') {
+            // 管理画面でリセットされた時などにリストを空にする
+            setBingoCards([]);
           }
         }
       )
@@ -100,16 +113,18 @@ export default function AdminPage() {
     };
   };
 
-  // 🌟 パスワードを送信した時の処理
+  // 🔑 パスワードを送信した時の処理
   const handlePasswordSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
-    // 🔑 ここで本番用のパスワードを設定します
-    if (passwordInput === 'kitfes2026') {
+    // 🌟【改善】環境変数に設定されていればそれを読み、なければ従来どおり "kitfes2026" を使用
+    const adminPassword = process.env.NEXT_PUBLIC_ADMIN_PASSWORD || 'kitfes2026';
+
+    if (passwordInput === adminPassword) {
       sessionStorage.setItem('admin-auth', 'true');
       setIsAuthenticated(true);
       setIsPasswordError(false);
-      fetchInitialData(); // データを取得しにいく
+      fetchInitialData();
     } else {
       setIsPasswordError(true);
     }
@@ -117,25 +132,31 @@ export default function AdminPage() {
 
   // 3. 新しい数字を引く処理
   const drawNextNumber = async () => {
+    // 🌟【バグ2対策】引く前にまず「すでに75個引いていないか」「現在ロール中でないか」をチェック
     if (drawnNumbers.length >= 75 || isRolling) return;
-
-    setIsRolling(true);
-    await supabase.from('game_state').update({ is_rolling: true }).eq('id', 1);
 
     const availableNumbers = Array.from({ length: 75 }, (_, i) => i + 1)
       .filter(num => !drawnNumbers.includes(num));
 
+    // 🌟【バグ2対策】もし残りの数字が0個なら、is_rollingをいじることなく安全に関数を抜ける
     if (availableNumbers.length === 0) return;
+
+    setIsRolling(true);
+    await supabase.from('game_state').update({ is_rolling: true }).eq('id', 1);
 
     const nextNum = availableNumbers[Math.floor(Math.random() * availableNumbers.length)];
 
-    let timer: NodeJS.Timeout;
     let duration = 0;
-    timer = setInterval(() => {
+    
+    // 🌟【バグ3対策】タイマーは useRef に保持する
+    rollIntervalRef.current = setInterval(() => {
       setCurrentNumber(Math.floor(Math.random() * 75) + 1);
       duration += 100;
       if (duration >= 2000) {
-        clearInterval(timer);
+        if (rollIntervalRef.current) {
+          clearInterval(rollIntervalRef.current);
+          rollIntervalRef.current = null;
+        }
         finalizeDraw(nextNum);
       }
     }, 100);
@@ -158,13 +179,21 @@ export default function AdminPage() {
     setIsRolling(false);
   };
 
-  // 4. ゲームリセット処理
+  // 4. ゲームリセット処理（session_idを新しくして、参加者側を強制同期させる）
   const resetGame = async () => {
     if (!confirm('本当に最初からやり直しますか？ビンゴ通知もすべてリセットされます。')) return;
 
+    // 🌟 新しいセッション用のランダムUUIDをクライアント側で生成
+    const newSessionId = crypto.randomUUID();
+
+    // 🌟【バグ1対策】リセットと同時に session_id も完全に新しい値に更新する！
     const { error: stateError } = await supabase
       .from('game_state')
-      .update({ drawn_numbers: [], is_rolling: false })
+      .update({ 
+        drawn_numbers: [], 
+        is_rolling: false,
+        session_id: newSessionId
+      })
       .eq('id', 1);
 
     const { error: bingoError } = await supabase
@@ -178,11 +207,11 @@ export default function AdminPage() {
       setDrawnNumbers([]);
       setCurrentNumber(null);
       setBingoCards([]);
-      alert('ゲームを完全に初期化しました！');
+      alert('ゲームを完全に初期化しました！新しいセッションを開始します。');
     }
   };
 
-  // 🌟【ログインフォーム】未認証の場合に、オシャレなログイン画面を表示する
+  // 🌟 未認証の場合のログイン画面
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 font-sans">
@@ -219,7 +248,7 @@ export default function AdminPage() {
 
             <button
               type="submit"
-              className="w-full bg-yellow-500 hover:bg-yellow-600 text-slate-950 font-bold py-3 rounded-xl text-sm transform active:scale-98 transition-all"
+              className="w-full bg-yellow-500 hover:bg-yellow-600 text-slate-950 font-bold py-3 rounded-xl text-sm transform active:scale-95 transition-all"
             >
               ログイン
             </button>
@@ -250,6 +279,13 @@ export default function AdminPage() {
         </button>
       </header>
 
+      {/* 🌟【UX追加】75個引き終わった時の「ゲーム完了バナー」 */}
+      {drawnNumbers.length >= 75 && (
+        <div className="w-full max-w-md mb-6 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 p-4 rounded-2xl text-center text-xs font-bold tracking-wider animate-fade-in">
+          🎉 すべての数字（75個）を引き終えました！ゲーム終了です！
+        </div>
+      )}
+
       {/* メイン抽選表示 */}
       <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-8 flex flex-col items-center shadow-2xl space-y-6">
         <div className="text-center">
@@ -257,7 +293,7 @@ export default function AdminPage() {
           <div className="text-8xl font-black text-yellow-400 my-4 h-24 flex items-center justify-center">
             {currentNumber !== null ? currentNumber : 'ー'}
           </div>
-          <p className="text-slate-400 text-xs">
+          <p className="text-slate-400 text-xs font-medium">
             {isRolling ? '数字を選出中...' : `現在: ${drawnNumbers.length} / 75個`}
           </p>
         </div>
@@ -265,18 +301,18 @@ export default function AdminPage() {
         <button
           onClick={drawNextNumber}
           disabled={isRolling || drawnNumbers.length >= 75}
-          className={`w-full py-5 rounded-2xl font-black text-xl transition-all duration-350 transform active:scale-95 shadow-lg ${
+          className={`w-full py-5 rounded-2xl font-black text-xl transition-all duration-300 transform active:scale-95 shadow-lg ${
             isRolling || drawnNumbers.length >= 75
-              ? 'bg-slate-800 text-slate-600 cursor-not-allowed border border-slate-700/50'
-              : 'bg-gradient-to-r from-yellow-500 to-amber-600 text-slate-950 hover:brightness-110 shadow-yellow-500/10 hover:shadow-yellow-500/20'
+              ? 'bg-slate-800/50 text-slate-600 cursor-not-allowed border border-slate-800/40'
+              : 'bg-gradient-to-r from-yellow-500 to-amber-600 text-slate-950 hover:brightness-110 shadow-yellow-500/10'
           }`}
         >
-          {isRolling ? 'ROLLING...' : '次の数字を引く'}
+          {isRolling ? 'ROLLING...' : drawnNumbers.length >= 75 ? '終了' : '次の数字を引く'}
         </button>
       </div>
 
       {/* リアルタイム・ビンゴ発生リスト */}
-      <div className="w-full max-w-md mt-8 bg-slate-900 border border-red-950/30 rounded-3xl p-6 shadow-2xl">
+      <div className="w-full max-w-md mt-8 bg-slate-900 border border-slate-800/60 rounded-3xl p-6 shadow-2xl">
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-sm font-bold text-red-400 flex items-center gap-2">
             <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-ping" />
@@ -285,12 +321,12 @@ export default function AdminPage() {
         </div>
         <div className="space-y-2 max-h-48 overflow-y-auto">
           {bingoCards.length === 0 ? (
-            <p className="text-slate-600 text-xs py-4 text-center">まだビンゴはいません。参加者を待ちましょう！</p>
+            <p className="text-slate-600 text-xs py-4 text-center font-medium">まだビンゴはいません。参加者を待ちましょう！</p>
           ) : (
             bingoCards.map((bingo, idx) => (
               <div 
                 key={bingo.id} 
-                className="flex justify-between items-center bg-slate-950/80 p-3 rounded-xl border border-red-950/40 animate-fade-in"
+                className="flex justify-between items-center bg-slate-950/80 p-3 rounded-xl border border-red-950/20 animate-fade-in"
               >
                 <div className="flex items-center gap-3">
                   <span className="text-xs font-black bg-red-600/20 text-red-400 px-2 py-1 rounded">

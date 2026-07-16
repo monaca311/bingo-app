@@ -12,7 +12,9 @@ const generateRandomCard = (): number[][] => {
     { min: 61, max: 75 }  // O
   ];
 
-  const pattern: number[][] = [];
+  // columns_data[0] = B列の5つの数字
+  // columns_data[1] = I列の5つの数字 ... という形の、縦ベースの配列を作ります
+  const columns_data: number[][] = [];
 
   columns.forEach((col, colIndex) => {
     const numbers: number[] = [];
@@ -26,10 +28,20 @@ const generateRandomCard = (): number[][] => {
     if (colIndex === 2) {
       numbers[2] = 0;
     }
-    pattern.push(numbers);
+    columns_data.push(numbers);
   });
 
-  return pattern;
+  // 🌟【最重要修正】表示（行ベース）に合わせて、縦と横をひっくり返す（転置）処理
+  // columns_data[列][行] のデータを、[行][列] の二次元配列に変換します
+  const transposedCard: number[][] = Array(5).fill(null).map(() => Array(5).fill(0));
+
+  for (let r = 0; r < 5; r++) {
+    for (let c = 0; c < 5; c++) {
+      transposedCard[r][c] = columns_data[c][r];
+    }
+  }
+
+  return transposedCard;
 };
 
 // 重複チェックを通過したカードを返すメイン処理
@@ -41,7 +53,7 @@ export async function getUniqueCard() {
   while (isDuplicate && attempts < 50) {
     const candidateCard = generateRandomCard();
 
-   // 【決定版】Supabaseのデータベース関数（RPC）を呼び出して重複チェックを行う
+    // Supabaseのデータベース関数（RPC）を呼び出して重複チェックを行う
     const { data: isDuplicateResult, error } = await supabase
       .rpc('check_card_duplicate', {
         candidate_pattern: candidateCard // 引数名と値をオブジェクトで渡す
@@ -49,11 +61,9 @@ export async function getUniqueCard() {
 
     if (error) {
       console.error('【デバッグ用】重複チェックエラーの詳細:', error);
-      // エラーメッセージを生でスローして画面に表示させる
       throw new Error(`Database query failed: ${error.message} (Code: ${error.code})`);
     }
 
-    // 一致するデータがなければ（isDuplicateResultがfalseなら）、重複なしとして確定！
     if (isDuplicateResult === false) {
       uniqueCard = candidateCard;
       isDuplicate = false;
