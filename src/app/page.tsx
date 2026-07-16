@@ -1,145 +1,246 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import confetti from 'canvas-confetti';
-import { evaluateBingoState } from '../utils/bingoUtils';
-import { BingoBoard } from '../components/BingoBoard';
-import { DevResetTrigger } from '../components/DevResetTrigger';
-import { getUniqueCard } from '../actions/getUniqueCard';
 import { supabase } from '../lib/supabase';
 
-export default function BingoPage() {
-  const [card, setCard] = useState<number[][]>([]);
-  const [punched, setPunched] = useState<boolean[][]>(
-    Array(5).fill(null).map(() => Array(5).fill(false))
-  );
-  const [isBingo, setIsBingo] = useState(false);
-  const [reachCoords, setReachCoords] = useState<string[]>([]);
-  const [lastTap, setLastTap] = useState(0);
+export default function BingoCardPage() {
+  const [card, setCard] = useState<number[][] | null>(null);
+  const [punched, setPunched] = useState<boolean[][]>([]);
+  const [drawnNumbers, setDrawnNumbers] = useState<number[]>([]);
+  const [cardId, setCardId] = useState<string>('');
+  const [hasSentBingo, setHasSentBingo] = useState<boolean>(false);
 
+  // 1. 初期読み込みとリアルタイム監視
   useEffect(() => {
-  const savedCard = localStorage.getItem('bingo-card');
-  const savedPunched = localStorage.getItem('bingo-punched');
+    const savedCard = localStorage.getItem('bingo-card');
+    const savedPunched = localStorage.getItem('bingo-punched');
+    const savedId = localStorage.getItem('bingo-card-id');
 
-  if (savedCard && savedPunched) {
-    const p = JSON.parse(savedPunched);
-    setCard(JSON.parse(savedCard));
-    setPunched(p);
-    triggerBingoCheck(p);
-  } else {
-      // サーバーサイドで紙カードと被らないカードを取得する
-      getUniqueCard()
+    if (savedId) {
+      setCardId(savedId);
+    } else {
+      const newId = `DG-${Math.floor(100 + Math.random() * 900)}`;
+      localStorage.setItem('bingo-card-id', newId);
+      setCardId(newId);
+    }
+
+    if (savedCard && savedPunched) {
+      setCard(JSON.parse(savedCard));
+      setPunched(JSON.parse(savedPunched));
+    } else {
+      import('../actions/getUniqueCard')
+        .then(({ getUniqueCard }) => getUniqueCard())
         .then((uniqueCard) => {
           setCard(uniqueCard);
-
           const initialPunched = Array(5).fill(null).map(() => Array(5).fill(false));
           initialPunched[2][2] = true; // FREE
           setPunched(initialPunched);
-
-          // 🌟【追加】スマホ用のデジタルカードID（例: DG-382）をランダム生成して保存する
-          const randomId = `DG-${Math.floor(100 + Math.random() * 900)}`;
-          localStorage.setItem('bingo-card-id', randomId);
 
           localStorage.setItem('bingo-card', JSON.stringify(uniqueCard));
           localStorage.setItem('bingo-punched', JSON.stringify(initialPunched));
         })
         .catch((err) => {
           console.error("カード生成に失敗:", err);
-          alert("通信エラーが発生しました。リロードしてください。");
+          alert("カードの生成に失敗しました。ページをリロードしてください。");
         });
     }
-}, []);
 
-  // 【追加】すでにビンゴ通知を送信したかどうかを記録するフラグ（連打で何回も通知が送られないようにするため）
-  const [hasSentBingo, setHasSentBingo] = useState(false);
+    const fetchGameState = async () => {
+      const { data } = await supabase
+        .from('game_state')
+        .select('drawn_numbers')
+        .eq('id', 1)
+        .single();
+      if (data) {
+        setDrawnNumbers(data.drawn_numbers || []);
+      }
+    };
+    fetchGameState();
 
-  const triggerBingoCheck = async (currentPunched: boolean[][]) => {
-    const { isBingo: bingoFound, reachCoords: newReachCoords } = evaluateBingoState(currentPunched);
-
-    if (bingoFound) {
-      if (!isBingo) {
-        confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
-        setIsBingo(true);
-
-        // 🌟【追加】ビンゴ通知をSupabaseに自動送信する！
-        if (!hasSentBingo) {
-          setHasSentBingo(true);
-          
-          const cardId = localStorage.getItem('bingo-card-id') || 'No.Temp_User';
-          
-          // 【デバッグ用ログ】
-          console.log('ビンゴ検知！送信するカードID:', cardId);
-
-          const { error } = await supabase
-            .from('active_bingos')
-            .insert([{ card_no: cardId }]);
-
-          if (error) {
-            console.error('ビンゴ通知の送信に失敗詳細:', error);
-            alert('通知送信に失敗しました: ' + error.message);
-          } else {
-            console.log('ビンゴ通知の送信に成功しました！');
-            alert(`ビンゴ通知を送信しました！ (ID: ${cardId})`);
-          }
+    const stateChannel = supabase
+      .channel('realtime_game_state_user')
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'game_state', filter: 'id=eq.1' },
+        (payload) => {
+          const updated = payload.new as { drawn_numbers: number[] };
+          setDrawnNumbers(updated.drawn_numbers || []);
         }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(stateChannel);
+    };
+  }, []);
+
+  // 2. タップ処理（出ていない数字は完全にスルー）
+  const handleCellClick = (row: number, col: number) => {
+    if (!card) return;
+    if (row === 2 && col === 2) return; // FREEはすでに開いているので無視
+
+    const targetNumber = card[row][col];
+
+    // 🌟【重要】出た数字にない場合は、アラートも出さずに完全に無反応（何もせずreturn）
+    if (!drawnNumbers.includes(targetNumber)) {
+      return;
+    }
+
+    const newPunched = punched.map((r, ri) =>
+      r.map((c, ci) => (ri === row && ci === col ? !c : c))
+    );
+    setPunched(newPunched);
+    localStorage.setItem('bingo-punched', JSON.stringify(newPunched));
+
+    checkBingo(newPunched);
+  };
+
+  // 3. ビンゴ判定
+  const checkBingo = async (currentPunched: boolean[][]) => {
+    let isBingo = false;
+
+    for (let r = 0; r < 5; r++) {
+      if (currentPunched[r].every((val) => val)) isBingo = true;
+    }
+    for (let c = 0; c < 5; c++) {
+      let colPunched = true;
+      for (let r = 0; r < 5; r++) {
+        if (!currentPunched[r][c]) colPunched = false;
       }
-      setReachCoords([]);
-    } else {
-      setIsBingo(false);
-      setReachCoords(newReachCoords);
-      // ビンゴ状態でなくなったら送信フラグをリセット（トグルで穴を塞ぎ直した時用）
-      setHasSentBingo(false);
+      if (colPunched) isBingo = true;
     }
-  };
+    if (
+      currentPunched[0][0] &&
+      currentPunched[1][1] &&
+      currentPunched[2][2] &&
+      currentPunched[3][3] &&
+      currentPunched[4][4]
+    ) {
+      isBingo = true;
+    }
+    if (
+      currentPunched[0][4] &&
+      currentPunched[1][3] &&
+      currentPunched[2][2] &&
+      currentPunched[3][1] &&
+      currentPunched[4][0]
+    ) {
+      isBingo = true;
+    }
 
-  const handlePunch = (colIndex: number, rowIndex: number) => {
-    const now = Date.now();
-    if (now - lastTap < 300) {
-      const next = [...punched.map(row => [...row])];
-      next[rowIndex][colIndex] = !next[rowIndex][colIndex];
+    if (isBingo && !hasSentBingo) {
+      setHasSentBingo(true);
+      const currentId = localStorage.getItem('bingo-card-id') || cardId || 'No.Temp_User';
 
-      setPunched(next);
-      localStorage.setItem('bingo-punched', JSON.stringify(next));
-      triggerBingoCheck(next);
+      const { error } = await supabase
+        .from('active_bingos')
+        .insert([{ card_no: currentId }]);
 
-      if (window.navigator.vibrate) {
-        window.navigator.vibrate(next[rowIndex][colIndex] ? [30, 10, 30] : [10]);
+      if (error) {
+        console.error('ビンゴ通知の送信に失敗:', error);
+        setHasSentBingo(false);
+      } else {
+        alert(`ビンゴおめでとうございます！🎉 (ID: ${currentId} を管理者に送信しました)`);
       }
     }
-    setLastTap(now);
   };
 
-  const handleReset = () => {
-    if (confirm('【運営】初期化して新しいカードを生成しますか？')) {
-      localStorage.clear();
-      window.location.reload();
-    }
-  };
-
-  if (card.length === 0) return null;
+  if (!card) {
+    return (
+      <div className="min-h-screen bg-[#202666] text-white flex items-center justify-center">
+        <p className="text-xl font-bold animate-pulse text-yellow-400">カード生成中...</p>
+      </div>
+    );
+  }
 
   return (
-    <main className="min-h-screen bg-slate-900 text-white p-4 flex flex-col items-center font-sans select-none overflow-x-hidden">
-      <div className="text-center mb-8">
-        <h1 className="text-4xl font-black italic text-yellow-400 cursor-pointer">
-          KITFES BINGO
-        </h1>
-        {isBingo && (
-          <p className="text-5xl font-black text-orange-500 animate-bounce mt-4">
-            BINGO!!
-          </p>
-        )}
+    // 🌟 確実な背景色：インラインスタイルで絶対カラーコード「#202666」を直指定
+    <main 
+      style={{ backgroundColor: '#202666' }} 
+      className="min-h-screen relative text-white p-4 flex flex-col items-center justify-center font-sans select-none overflow-hidden"
+    >
+      
+      {/* 🌟 背景のきらきら（星空・スパークル）の装飾 */}
+      <div className="absolute inset-0 opacity-40 pointer-events-none">
+        <div className="absolute top-10 left-10 w-2 h-2 bg-white rounded-full animate-ping [animation-duration:3s]" />
+        <div className="absolute top-1/4 right-12 w-1.5 h-1.5 bg-yellow-300 rounded-full animate-pulse [animation-duration:2s]" />
+        <div className="absolute bottom-1/3 left-8 w-1 h-1 bg-white rounded-full animate-pulse [animation-duration:4s]" />
+        <div className="absolute bottom-12 right-20 w-2 h-2 bg-purple-300 rounded-full animate-ping [animation-duration:5s]" />
+        {/* 背景の中央を少しだけグラデーションで美しく浮かせる */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-white/5 rounded-full blur-[120px] pointer-events-none" />
       </div>
 
-      <BingoBoard
-        card={card}
-        punched={punched}
-        isBingo={isBingo}
-        reachCoords={reachCoords}
-        onPunch={handlePunch}
-      />
+      {/* コンテンツエリア */}
+      <div className="relative z-10 w-full max-w-sm flex flex-col items-center">
+        
+        {/* 1. ID表示：サイズを小さく抑えたミニマルなプレート */}
+        <div className="mb-4 flex items-center gap-1.5 bg-black/40 backdrop-blur-md border border-white/10 px-3.5 py-1 rounded-full shadow-inner">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          <p className="text-[11px] font-semibold tracking-wider text-white/70">
+            CARD ID: <span className="text-white font-mono text-[12px]">{cardId}</span>
+          </p>
+        </div>
 
-      <DevResetTrigger onReset={handleReset} />
+        {/* ビンゴカード本体 */}
+        <div className="w-full bg-black/30 border border-white/10 p-5 rounded-[36px] shadow-[0_20px_50px_rgba(0,0,0,0.4)] backdrop-blur-lg">
+          
+          {/* B I N G O ヘッダー */}
+          <div className="grid grid-cols-5 gap-2.5 mb-3">
+            {['B', 'I', 'N', 'G', 'O'].map((char) => (
+              <div key={char} className="text-center font-black text-xl tracking-wider text-transparent bg-clip-text bg-gradient-to-b from-white to-white/75">
+                {char}
+              </div>
+            ))}
+          </div>
+
+          {/* 5x5 マス目 */}
+          <div className="grid grid-cols-5 gap-2.5">
+            {card.map((row, rIdx) =>
+              row.map((num, cIdx) => {
+                const isFree = rIdx === 2 && cIdx === 2;
+                const isPunched = punched[rIdx]?.[cIdx];
+                const isAvailable = isFree || drawnNumbers.includes(num);
+
+                return (
+                  <button
+                    key={`${rIdx}-${cIdx}`}
+                    onClick={() => handleCellClick(rIdx, cIdx)}
+                    disabled={isFree}
+                    className={`aspect-square relative rounded-2xl text-xl font-black flex items-center justify-center transition-all duration-300 overflow-hidden ${
+                      isFree
+                        ? 'bg-gradient-to-br from-yellow-400 to-amber-500 text-slate-950 shadow-[0_0_15px_rgba(250,204,21,0.4)]'
+                        // 🌟 2. 穴あき（ペコッと凹んだ風）のスタイル
+                        : isPunched
+                          ? 'bg-black/40 text-white/20 shadow-[inset_0_5px_8px_rgba(0,0,0,0.8)] border border-black/50 scale-[0.93] pointer-events-auto'
+                          : isAvailable
+                            ? 'bg-white/10 text-yellow-300 border border-yellow-300/40 hover:scale-105 active:scale-95 shadow-[0_4px_12px_rgba(250,204,21,0.1)]'
+                            // まだ出ていない数字（クリックしても完全無視）
+                            : 'bg-black/20 text-white/20 border border-white/5 cursor-not-allowed'
+                    }`}
+                  >
+                    {isFree && <span className="relative z-10 text-[13px] tracking-wider">FREE</span>}
+
+                    {!isFree && (
+                      <span className={`relative z-10 transition-transform duration-300 ${isPunched ? 'scale-75 text-white/10 font-bold' : ''}`}>
+                        {num}
+                      </span>
+                    )}
+
+                    {isPunched && !isFree && (
+                      <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_transparent_30%,_rgba(0,0,0,0.4)_100%)] pointer-events-none" />
+                    )}
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        {/* フッター */}
+        <footer className="mt-6 text-[10px] tracking-widest text-white/40 font-medium">
+          KITFES BINGO 2026
+        </footer>
+      </div>
     </main>
   );
 }

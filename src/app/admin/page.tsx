@@ -15,12 +15,29 @@ export default function AdminPage() {
   const [currentNumber, setCurrentNumber] = useState<number | null>(null);
   const [isRolling, setIsRolling] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  
-  // 【追加】ビンゴしたカードIDを保持するState
   const [bingoCards, setBingoCards] = useState<BingoNotification[]>([]);
 
-  // 1. 初期化 ＆ リアルタイム監視の設定
+  // 🌟【安全なパスワード管理】
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [passwordInput, setPasswordInput] = useState('');
+  const [isPasswordError, setIsPasswordError] = useState(false);
+
+  // 1. 初回のセッションチェック
   useEffect(() => {
+    const isAlreadyAuth = sessionStorage.getItem('admin-auth') === 'true';
+    if (isAlreadyAuth) {
+      setIsAuthenticated(true);
+      fetchInitialData();
+    } else {
+      // ログインしていない場合はローディングを外して入力フォームを出す
+      setIsLoading(false);
+    }
+  }, []);
+
+  // 2. 認証成功した後にSupabaseのデータ取得やリアルタイム接続を開始する
+  const fetchInitialData = () => {
+    setIsLoading(true);
+
     const fetchGameState = async () => {
       const { data, error } = await supabase
         .from('game_state')
@@ -41,33 +58,29 @@ export default function AdminPage() {
       setIsLoading(false);
     };
 
-    // 【追加】すでにビンゴしているカードの初期取得
     const fetchExistingBingos = async () => {
       const { data } = await supabase
         .from('active_bingos')
         .select('*')
-        .order('created_at', { ascending: true }); // ビンゴしたのが早い順
+        .order('created_at', { ascending: true });
       if (data) setBingoCards(data);
     };
 
     fetchGameState();
     fetchExistingBingos();
 
-    // 【修正後】リアルタイムでビンゴ検知をリッスンする設定
-   // 【超・確実版】イベント全体を検知して確実にキャッチする設定
     const bingoChannel = supabase
       .channel('realtime_bingos')
       .on(
         'postgres_changes',
         { 
-          event: '*', // INSERTだけでなくすべてキャッチ（後からリセットのDELETEも検知できるようになるよ！）
+          event: '*', 
           schema: 'public', 
           table: 'active_bingos' 
         },
         (payload) => {
           console.log('リアルタイムのペイロードを受信:', payload);
 
-          // 新しい行がインサート（挿入）された時だけリストに追加
           if (payload.eventType === 'INSERT') {
             const newBingo = payload.new as BingoNotification;
             setBingoCards((prev) => [...prev, newBingo]);
@@ -79,17 +92,30 @@ export default function AdminPage() {
         }
       )
       .subscribe((status) => {
-        // デバッグ用：接続状況をコンソールに表示
         console.log('リアルタイム接続ステータス:', status);
       });
 
-    // クリーンアップ処理
     return () => {
       supabase.removeChannel(bingoChannel);
     };
-  }, []);
+  };
 
-  // 2. 新しい数字を引く処理
+  // 🌟 パスワードを送信した時の処理
+  const handlePasswordSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    // 🔑 ここで本番用のパスワードを設定します
+    if (passwordInput === 'kitfes2026') {
+      sessionStorage.setItem('admin-auth', 'true');
+      setIsAuthenticated(true);
+      setIsPasswordError(false);
+      fetchInitialData(); // データを取得しにいく
+    } else {
+      setIsPasswordError(true);
+    }
+  };
+
+  // 3. 新しい数字を引く処理
   const drawNextNumber = async () => {
     if (drawnNumbers.length >= 75 || isRolling) return;
 
@@ -132,21 +158,19 @@ export default function AdminPage() {
     setIsRolling(false);
   };
 
-  // 3. ゲームリセット処理（出た数字も、ビンゴ通知リストもすべてクリアする）
+  // 4. ゲームリセット処理
   const resetGame = async () => {
     if (!confirm('本当に最初からやり直しますか？ビンゴ通知もすべてリセットされます。')) return;
 
-    // A. 抽選機の数字をクリア
     const { error: stateError } = await supabase
       .from('game_state')
       .update({ drawn_numbers: [], is_rolling: false })
       .eq('id', 1);
 
-    // B. ビンゴ通知テーブルを全削除
     const { error: bingoError } = await supabase
       .from('active_bingos')
       .delete()
-      .neq('id', 0); // すべてのレコードにマッチさせて全削除
+      .neq('id', 0);
 
     if (stateError || bingoError) {
       alert('リセット処理中にエラーが発生しました');
@@ -158,10 +182,58 @@ export default function AdminPage() {
     }
   };
 
+  // 🌟【ログインフォーム】未認証の場合に、オシャレなログイン画面を表示する
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 font-sans">
+        <div className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl text-center space-y-6">
+          <div>
+            <span className="inline-block bg-amber-500/10 text-amber-500 text-xs px-3 py-1 rounded-full font-semibold mb-2 tracking-widest">
+              ADMIN ONLY
+            </span>
+            <h1 className="text-xl font-bold text-white">KITFES 管理コンソール</h1>
+            <p className="text-xs text-slate-500 mt-1">
+              これより先は管理者専用です。パスワードを入力してください。
+            </p>
+          </div>
+
+          <form onSubmit={handlePasswordSubmit} className="space-y-4 text-left">
+            <div>
+              <input
+                type="password"
+                placeholder="パスワードを入力"
+                value={passwordInput}
+                onChange={(e) => setPasswordInput(e.target.value)}
+                className={`w-full bg-slate-950 border text-white rounded-xl px-4 py-3 text-sm focus:outline-none transition-all ${
+                  isPasswordError 
+                    ? 'border-red-500 focus:ring-1 focus:ring-red-500' 
+                    : 'border-slate-800 focus:border-yellow-500 focus:ring-1 focus:ring-yellow-500'
+                }`}
+              />
+              {isPasswordError && (
+                <p className="text-red-500 text-xs mt-1.5 ml-1 font-semibold">
+                  パスワードが間違っています。
+                </p>
+              )}
+            </div>
+
+            <button
+              type="submit"
+              className="w-full bg-yellow-500 hover:bg-yellow-600 text-slate-950 font-bold py-3 rounded-xl text-sm transform active:scale-98 transition-all"
+            >
+              ログイン
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // 認証中かつSupabaseの接続を待っている間
   if (isLoading) {
     return (
       <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center font-sans">
-        <p className="text-xl animate-pulse">Supabaseに接続中...</p>
+        <p className="text-xl animate-pulse text-slate-400">Supabaseに接続中...</p>
       </div>
     );
   }
@@ -203,7 +275,7 @@ export default function AdminPage() {
         </button>
       </div>
 
-      {/* 【追加】リアルタイム・ビンゴ発生リスト */}
+      {/* リアルタイム・ビンゴ発生リスト */}
       <div className="w-full max-w-md mt-8 bg-slate-900 border border-red-950/30 rounded-3xl p-6 shadow-2xl">
         <div className="flex justify-between items-center mb-4">
           <h2 className="text-sm font-bold text-red-400 flex items-center gap-2">
