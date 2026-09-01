@@ -3,152 +3,154 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { supabase } from '../../lib/supabase';
 
-// ビンゴ通知データの型定義
-interface BingoNotification {
+interface BingoRecord {
   id: number;
   card_no: string;
   created_at: string;
 }
 
-export default function AdminPage() {
-  const [drawnNumbers, setDrawnNumbers] = useState<number[]>([]);
-  const [currentNumber, setCurrentNumber] = useState<number | null>(null);
-  const [isRolling, setIsRolling] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
-  const [bingoCards, setBingoCards] = useState<BingoNotification[]>([]);
+type GameMode = 'digital' | 'card_only';
 
-  // 🔑 パスワードが認証されたかどうかの状態
+export default function AdminPage() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [isPasswordError, setIsPasswordError] = useState(false);
 
-  // 🌟【バグ3対策】タイマーリークを防ぐための useRef
+  const [gameMode, setGameMode] = useState<GameMode>('card_only');
+  const [isDistributing, setIsDistributing] = useState(true);
+  const [drawnNumbers, setDrawnNumbers] = useState<number[]>([]);
+  const [currentNumber, setCurrentNumber] = useState<number | null>(null);
+  const [isRolling, setIsRolling] = useState(false);
+  const [records, setRecords] = useState<BingoRecord[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
   const rollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  // 1. 初回のセッションチェック & クリーンアップ
   useEffect(() => {
     const isAlreadyAuth = sessionStorage.getItem('admin-auth') === 'true';
     if (isAlreadyAuth) {
       setIsAuthenticated(true);
-      fetchInitialData();
+      fetchData();
     } else {
       setIsLoading(false);
     }
 
-    // 🌟【バグ3対策】コンポーネントが消える（画面遷移する）時にインターバルを確実に消去
     return () => {
-      if (rollIntervalRef.current) {
-        clearInterval(rollIntervalRef.current);
-      }
+      if (rollIntervalRef.current) clearInterval(rollIntervalRef.current);
     };
   }, []);
 
-  // 2. 認証成功後にSupabaseのデータ取得やリアルタイム接続を開始する
-  const fetchInitialData = () => {
+  const fetchData = async () => {
     setIsLoading(true);
 
-    const fetchGameState = async () => {
-      const { data, error } = await supabase
-        .from('game_state')
-        .select('*')
-        .eq('id', 1)
-        .single();
+    const { data: stateData } = await supabase
+      .from('game_state')
+      .select('*')
+      .eq('id', 1)
+      .single();
 
-      if (error && error.code === 'PGRST116') {
-        // レコードがない場合は新規作成（session_idもランダムに生成してセットするよ）
-        await supabase
-          .from('game_state')
-          .insert([{ id: 1, drawn_numbers: [], is_rolling: false }]);
-      } else if (data) {
-        setDrawnNumbers(data.drawn_numbers || []);
-        if (data.drawn_numbers && data.drawn_numbers.length > 0) {
-          setCurrentNumber(data.drawn_numbers[data.drawn_numbers.length - 1]);
-        }
+    if (stateData) {
+      setGameMode((stateData.game_mode as GameMode) || 'card_only');
+      setIsDistributing(stateData.is_distributing ?? true);
+      setDrawnNumbers(stateData.drawn_numbers || []);
+      if (stateData.drawn_numbers?.length > 0) {
+        setCurrentNumber(stateData.drawn_numbers[stateData.drawn_numbers.length - 1]);
       }
-      setIsLoading(false);
-    };
+    }
 
-    const fetchExistingBingos = async () => {
-      const { data } = await supabase
-        .from('active_bingos')
-        .select('*')
-        .order('created_at', { ascending: true });
-      if (data) setBingoCards(data);
-    };
+    const { data: recordsData } = await supabase
+      .from('active_bingos')
+      .select('*')
+      .order('id', { ascending: true });
 
-    fetchGameState();
-    fetchExistingBingos();
+    if (recordsData) {
+      setRecords(recordsData);
+    }
 
-    const bingoChannel = supabase
-      .channel('realtime_bingos')
+    const channel = supabase
+      .channel('realtime_admin_sync')
       .on(
         'postgres_changes',
-        { 
-          event: '*', 
-          schema: 'public', 
-          table: 'active_bingos' 
-        },
+        { event: '*', schema: 'public', table: 'active_bingos' },
         (payload) => {
-          console.log('リアルタイムのペイロードを受信:', payload);
-
           if (payload.eventType === 'INSERT') {
-            const newBingo = payload.new as BingoNotification;
-            setBingoCards((prev) => [...prev, newBingo]);
-            
-            if (window.navigator.vibrate) {
-              window.navigator.vibrate([100, 50, 100]);
-            }
+            setRecords((prev) => [...prev, payload.new as BingoRecord]);
+            if (window.navigator.vibrate) window.navigator.vibrate([100, 50, 100]);
           } else if (payload.eventType === 'DELETE') {
-            // 管理画面でリセットされた時などにリストを空にする
-            setBingoCards([]);
+            setRecords([]);
           }
         }
       )
-      .subscribe((status) => {
-        console.log('リアルタイム接続ステータス:', status);
-      });
+      .subscribe();
 
-    return () => {
-      supabase.removeChannel(bingoChannel);
-    };
+    setIsLoading(false);
   };
 
-  // 🔑 パスワードを送信した時の処理
   const handlePasswordSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // 🌟【改善】環境変数に設定されていればそれを読み、なければ従来どおり "kitfes2026" を使用
     const adminPassword = process.env.NEXT_PUBLIC_ADMIN_PASSWORD || 'kitfes2026';
 
     if (passwordInput === adminPassword) {
       sessionStorage.setItem('admin-auth', 'true');
       setIsAuthenticated(true);
       setIsPasswordError(false);
-      fetchInitialData();
+      fetchData();
     } else {
       setIsPasswordError(true);
     }
   };
 
-  // 3. 新しい数字を引く処理
+  // モード切り替え
+  const changeGameMode = async (mode: GameMode) => {
+    const { error } = await supabase
+      .from('game_state')
+      .update({ game_mode: mode })
+      .eq('id', 1);
+
+    if (!error) {
+      setGameMode(mode);
+    }
+  };
+
+  // 配布受付トグル（確実に更新 & エラーハンドリング）
+  const toggleDistribution = async () => {
+    const nextState = !isDistributing;
+    console.log('配布状態を切り替えます:', nextState);
+
+    // 画面側を先行して切り替え（体感を良くする）
+    setIsDistributing(nextState);
+
+    const { data, error } = await supabase
+      .from('game_state')
+      .update({ is_distributing: nextState })
+      .eq('id', 1)
+      .select();
+
+    if (error) {
+      console.error('配布状態の更新エラー:', error);
+      alert('データベースの更新に失敗しました: ' + error.message);
+      // 失敗した場合は元の状態に戻す
+      setIsDistributing(!nextState);
+    } else {
+      console.log('更新成功:', data);
+    }
+  };
+
+  // デジタル抽選：数字を引く
   const drawNextNumber = async () => {
-    // 🌟【バグ2対策】引く前にまず「すでに75個引いていないか」「現在ロール中でないか」をチェック
     if (drawnNumbers.length >= 75 || isRolling) return;
 
     const availableNumbers = Array.from({ length: 75 }, (_, i) => i + 1)
-      .filter(num => !drawnNumbers.includes(num));
+      .filter((num) => !drawnNumbers.includes(num));
 
-    // 🌟【バグ2対策】もし残りの数字が0個なら、is_rollingをいじることなく安全に関数を抜ける
     if (availableNumbers.length === 0) return;
 
     setIsRolling(true);
     await supabase.from('game_state').update({ is_rolling: true }).eq('id', 1);
 
     const nextNum = availableNumbers[Math.floor(Math.random() * availableNumbers.length)];
-
     let duration = 0;
-    
-    // 🌟【バグ3対策】タイマーは useRef に保持する
+
     rollIntervalRef.current = setInterval(() => {
       setCurrentNumber(Math.floor(Math.random() * 75) + 1);
       duration += 100;
@@ -164,54 +166,46 @@ export default function AdminPage() {
 
   const finalizeDraw = async (nextNum: number) => {
     const updatedNumbers = [...drawnNumbers, nextNum];
-    
     const { error } = await supabase
       .from('game_state')
       .update({ drawn_numbers: updatedNumbers, is_rolling: false })
       .eq('id', 1);
 
-    if (error) {
-      alert('データベースの更新に失敗しました: ' + error.message);
-    } else {
+    if (!error) {
       setDrawnNumbers(updatedNumbers);
       setCurrentNumber(nextNum);
     }
     setIsRolling(false);
   };
 
-  // 4. ゲームリセット処理（session_idを新しくして、参加者側を強制同期させる）
-  const resetGame = async () => {
-    if (!confirm('本当に最初からやり直しますか？ビンゴ通知もすべてリセットされます。')) return;
+  // 全リセット
+  const resetAll = async () => {
+    if (!confirm('全ゲームデータを初期化して新しい回を開始しますか？')) return;
 
-    // 🌟 新しいセッション用のランダムUUIDをクライアント側で生成
     const newSessionId = crypto.randomUUID();
 
-    // 🌟【バグ1対策】リセットと同時に session_id も完全に新しい値に更新する！
-    const { error: stateError } = await supabase
+    await supabase
       .from('game_state')
-      .update({ 
-        drawn_numbers: [], 
+      .update({
+        session_id: newSessionId,
+        drawn_numbers: [],
         is_rolling: false,
-        session_id: newSessionId
+        is_distributing: true,
       })
       .eq('id', 1);
 
-    const { error: bingoError } = await supabase
+    await supabase
       .from('active_bingos')
       .delete()
       .neq('id', 0);
 
-    if (stateError || bingoError) {
-      alert('リセット処理中にエラーが発生しました');
-    } else {
-      setDrawnNumbers([]);
-      setCurrentNumber(null);
-      setBingoCards([]);
-      alert('ゲームを完全に初期化しました！新しいセッションを開始します。');
-    }
+    setDrawnNumbers([]);
+    setCurrentNumber(null);
+    setRecords([]);
+    setIsDistributing(true);
+    alert('初期化完了：新規ゲームが開始されました。');
   };
 
-  // 🌟 未認証の場合のログイン画面
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 font-sans">
@@ -221,35 +215,19 @@ export default function AdminPage() {
               ADMIN ONLY
             </span>
             <h1 className="text-xl font-bold text-white">KITFES 管理コンソール</h1>
-            <p className="text-xs text-slate-500 mt-1">
-              これより先は管理者専用です。パスワードを入力してください。
-            </p>
           </div>
-
           <form onSubmit={handlePasswordSubmit} className="space-y-4 text-left">
-            <div>
-              <input
-                type="password"
-                placeholder="パスワードを入力"
-                value={passwordInput}
-                onChange={(e) => setPasswordInput(e.target.value)}
-                className={`w-full bg-slate-950 border text-white rounded-xl px-4 py-3 text-sm focus:outline-none transition-all ${
-                  isPasswordError 
-                    ? 'border-red-500 focus:ring-1 focus:ring-red-500' 
-                    : 'border-slate-800 focus:border-yellow-500 focus:ring-1 focus:ring-yellow-500'
-                }`}
-              />
-              {isPasswordError && (
-                <p className="text-red-500 text-xs mt-1.5 ml-1 font-semibold">
-                  パスワードが間違っています。
-                </p>
-              )}
-            </div>
-
-            <button
-              type="submit"
-              className="w-full bg-yellow-500 hover:bg-yellow-600 text-slate-950 font-bold py-3 rounded-xl text-sm transform active:scale-95 transition-all"
-            >
+            <input
+              type="password"
+              placeholder="パスワードを入力"
+              value={passwordInput}
+              onChange={(e) => setPasswordInput(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 focus:border-yellow-500 text-white rounded-xl px-4 py-3 text-sm focus:outline-none"
+            />
+            {isPasswordError && (
+              <p className="text-red-500 text-xs mt-1">パスワードが間違っています</p>
+            )}
+            <button type="submit" className="w-full bg-yellow-500 hover:bg-yellow-600 text-slate-950 font-bold py-3 rounded-xl text-sm">
               ログイン
             </button>
           </form>
@@ -258,110 +236,102 @@ export default function AdminPage() {
     );
   }
 
-  // 認証中かつSupabaseの接続を待っている間
-  if (isLoading) {
-    return (
-      <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center font-sans">
-        <p className="text-xl animate-pulse text-slate-400">Supabaseに接続中...</p>
-      </div>
-    );
-  }
-
   return (
     <main className="min-h-screen bg-slate-950 text-white p-6 flex flex-col items-center font-sans select-none">
-      <header className="w-full max-w-md flex justify-between items-center mb-10">
-        <h1 className="text-xl font-bold text-slate-400">KITFES 管理コンソール</h1>
-        <button 
-          onClick={resetGame}
-          className="px-3 py-1 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white rounded-lg text-xs font-semibold border border-red-500/30 transition-all"
-        >
+      <header className="w-full max-w-md flex justify-between items-center mb-6">
+        <h1 className="text-lg font-bold text-slate-400">KITFES 管理コンソール</h1>
+        <button onClick={resetAll} className="px-3 py-1 bg-red-600/20 hover:bg-red-600 text-red-400 hover:text-white rounded-lg text-xs font-semibold border border-red-500/30">
           全リセット
         </button>
       </header>
 
-      {/* 🌟【UX追加】75個引き終わった時の「ゲーム完了バナー」 */}
-      {drawnNumbers.length >= 75 && (
-        <div className="w-full max-w-md mb-6 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 p-4 rounded-2xl text-center text-xs font-bold tracking-wider animate-fade-in">
-          🎉 すべての数字（75個）を引き終えました！ゲーム終了です！
-        </div>
-      )}
-
-      {/* メイン抽選表示 */}
-      <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-8 flex flex-col items-center shadow-2xl space-y-6">
-        <div className="text-center">
-          <p className="text-slate-500 text-sm font-semibold uppercase tracking-wider">Current Number</p>
-          <div className="text-8xl font-black text-yellow-400 my-4 h-24 flex items-center justify-center">
-            {currentNumber !== null ? currentNumber : 'ー'}
-          </div>
-          <p className="text-slate-400 text-xs font-medium">
-            {isRolling ? '数字を選出中...' : `現在: ${drawnNumbers.length} / 75個`}
-          </p>
-        </div>
-
+      {/* モード選択タブ */}
+      <div className="w-full max-w-md grid grid-cols-2 gap-2 bg-slate-900 p-1.5 rounded-2xl border border-slate-800 mb-6">
         <button
-          onClick={drawNextNumber}
-          disabled={isRolling || drawnNumbers.length >= 75}
-          className={`w-full py-5 rounded-2xl font-black text-xl transition-all duration-300 transform active:scale-95 shadow-lg ${
-            isRolling || drawnNumbers.length >= 75
-              ? 'bg-slate-800/50 text-slate-600 cursor-not-allowed border border-slate-800/40'
-              : 'bg-gradient-to-r from-yellow-500 to-amber-600 text-slate-950 hover:brightness-110 shadow-yellow-500/10'
+          onClick={() => changeGameMode('card_only')}
+          className={`py-2.5 rounded-xl text-xs font-black transition-all ${
+            gameMode === 'card_only'
+              ? 'bg-yellow-500 text-slate-950 shadow-md'
+              : 'text-slate-400 hover:text-white'
           }`}
         >
-          {isRolling ? 'ROLLING...' : drawnNumbers.length >= 75 ? '終了' : '次の数字を引く'}
+          🎲 ガラガラ（カード配布のみ）
+        </button>
+        <button
+          onClick={() => changeGameMode('digital')}
+          className={`py-2.5 rounded-xl text-xs font-black transition-all ${
+            gameMode === 'digital'
+              ? 'bg-yellow-500 text-slate-950 shadow-md'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          ⚡ アプリ完結（デジタル抽選）
         </button>
       </div>
 
-     {/* リアルタイム・ビンゴ発生リスト */}
-      <div className="w-full max-w-md mt-8 bg-slate-900 border border-slate-800/60 rounded-3xl p-6 shadow-2xl">
-        <div className="flex justify-between items-center mb-4">
-          <h2 className="text-sm font-bold text-red-400 flex items-center gap-2">
-            <span className="w-2.5 h-2.5 bg-red-500 rounded-full animate-ping" />
-            リアルタイム・ビンゴ通知 ({bingoCards.length})
-          </h2>
+      {/* 配布受付ステータス */}
+      <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-4 flex justify-between items-center mb-6 relative z-10">
+        <div>
+          <p className="text-[10px] font-bold text-slate-500 uppercase">カード配布受付</p>
+          <p className={`text-sm font-black ${isDistributing ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {isDistributing ? '受付中 (QR有効)' : '締切済み (新規遮断)'}
+          </p>
         </div>
-        <div className="space-y-2 max-h-48 overflow-y-auto">
-          {bingoCards.length === 0 ? (
-            <p className="text-slate-600 text-xs py-4 text-center font-medium">まだビンゴはいません。参加者を待ちましょう！</p>
+        <button
+          type="button"
+          onClick={toggleDistribution}
+          className={`px-4 py-2 rounded-xl font-black text-xs cursor-pointer active:scale-95 transition-all shadow-md ${
+            isDistributing 
+              ? 'bg-rose-600 hover:bg-rose-500 text-white' 
+              : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+          }`}
+        >
+          {isDistributing ? '配布を締切る' : '配布を再開'}
+        </button>
+      </div>
+
+      {/* デジタル抽選コンソール（デジタルモード時のみ表示） */}
+      {gameMode === 'digital' && (
+        <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-6 flex flex-col items-center mb-6 space-y-4 shadow-xl">
+          <div className="text-center">
+            <p className="text-slate-500 text-xs font-semibold uppercase">Current Number</p>
+            <div className="text-7xl font-black text-yellow-400 my-2 h-20 flex items-center justify-center">
+              {currentNumber !== null ? currentNumber : 'ー'}
+            </div>
+            <p className="text-slate-400 text-xs">{drawnNumbers.length} / 75個 抽選済み</p>
+          </div>
+          <button
+            onClick={drawNextNumber}
+            disabled={isRolling || drawnNumbers.length >= 75}
+            className={`w-full py-4 rounded-xl font-black text-lg ${
+              isRolling || drawnNumbers.length >= 75
+                ? 'bg-slate-800 text-slate-600 cursor-not-allowed'
+                : 'bg-gradient-to-r from-yellow-500 to-amber-600 text-slate-950 active:scale-95'
+            }`}
+          >
+            {isRolling ? 'ROLLING...' : drawnNumbers.length >= 75 ? '抽選終了' : '次の数字を引く'}
+          </button>
+        </div>
+      )}
+
+      {/* 一覧リスト */}
+      <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-3xl p-6 shadow-2xl">
+        <h2 className="text-sm font-bold text-slate-300 mb-3">
+          {gameMode === 'digital' ? `当選ビンゴ通知 (${records.length})` : `発行済みカード (${records.length})`}
+        </h2>
+        <div className="space-y-2 max-h-60 overflow-y-auto">
+          {records.length === 0 ? (
+            <p className="text-slate-600 text-xs py-4 text-center">データはありません</p>
           ) : (
-            bingoCards.map((bingo, idx) => (
-              <div 
-                key={bingo.id} 
-                className="flex justify-between items-center bg-slate-950/80 p-3 rounded-xl border border-red-950/20 animate-fade-in"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="text-xs font-black bg-red-600/20 text-red-400 px-2 py-1 rounded">
-                    第 {idx + 1} 号
-                  </span>
-                  {/* 🌟【超重要】card_noではなく、DBが保証する一意の連番idを使って「DG-xx」と表示！ */}
-                  <span className="font-bold text-slate-200">ID: DG-{bingo.id}</span>
-                </div>
+            records.map((r, idx) => (
+              <div key={r.id} className="flex justify-between items-center bg-slate-950 p-3 rounded-xl border border-slate-800/80">
+                <span className="font-mono font-bold text-yellow-400">
+                  {gameMode === 'digital' ? `第${idx + 1}号: ${r.card_no}` : `DG-${r.id}`}
+                </span>
                 <span className="text-[10px] text-slate-500">
-                  {new Date(bingo.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                  {new Date(r.created_at).toLocaleTimeString()}
                 </span>
               </div>
-            ))
-          )}
-        </div>
-      </div>
-      
-      {/* 履歴一覧 */}
-      <div className="w-full max-w-md mt-8">
-        <h2 className="text-sm font-bold text-slate-400 mb-4">これまでの履歴 ({drawnNumbers.length})</h2>
-        <div className="flex flex-wrap gap-2 max-h-48 overflow-y-auto bg-slate-900/50 p-4 rounded-2xl border border-slate-800">
-          {drawnNumbers.length === 0 ? (
-            <p className="text-slate-600 text-xs py-2 w-full text-center">まだ数字は引かれていません</p>
-          ) : (
-            [...drawnNumbers].reverse().map((num, i) => (
-              <span 
-                key={num} 
-                className={`w-10 h-10 flex items-center justify-center rounded-xl text-sm font-black ${
-                  i === 0 
-                    ? 'bg-yellow-400 text-slate-950 shadow-[0_0_10px_rgba(250,204,21,0.5)] scale-105' 
-                    : 'bg-slate-800 text-slate-300 border border-slate-700'
-                }`}
-              >
-                {num}
-              </span>
             ))
           )}
         </div>
