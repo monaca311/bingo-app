@@ -198,14 +198,17 @@ export default function BingoCardPage() {
       setReachCells(new Set());
       setIsReach(false);
 
+      // 🌟【修正ポイント】
+      // モーダル表示と紙吹雪は「タップ操作で新しくビンゴになった瞬間（!wasBingo）」ならいつでも動かす！
+      if (triggerEffects && !wasBingo) {
+        setShowBingoModal(true);
+        confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+      }
+
+      // 🌟【通知・送信処理だけを1回制限にする】
       if (!alreadySent) {
         setHasSentBingo(true);
         localStorage.setItem('bingo-has-sent', 'true');
-
-        if (triggerEffects && !wasBingo) {
-          setShowBingoModal(true);
-          confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
-        }
 
         // デジタルモード時は管理画面へリアルタイム当選通知
         if (mode === 'digital' && currentId) {
