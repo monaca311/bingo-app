@@ -365,7 +365,7 @@ export default function BingoCardPage() {
             </div>
 
             <div className="text-xs text-slate-400 leading-relaxed">
-              この画面を開いたまま、ステージまたは受付スタッフへお越しください！
+              この画面を開いたまま、ステージまたは受付スタッフへお越しください！/nダブルビンゴを目指す方はカードに戻るボタンを押してください
             </div>
 
             <button
